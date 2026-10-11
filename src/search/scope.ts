@@ -151,7 +151,14 @@ export function deleteMessagesForChats(chatIds: string[]): number {
       ids,
     )
     handle.exec(`DELETE FROM messages WHERE chatId IN ${placeholders};`, ids)
-    return counted?.c ?? 0
+    // Report what was actually removed, not what was targeted: a purge that
+    // silently matched nothing must not read as success.
+    const remaining = handle
+      .prepare<{ c: number }>(
+        `SELECT COUNT(*) as c FROM messages WHERE chatId IN ${placeholders};`,
+      )
+      .get(...ids)
+    return (counted?.c ?? 0) - (remaining?.c ?? 0)
   })
   return purge(chatIds)
 }

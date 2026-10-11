@@ -144,6 +144,13 @@ export async function collectMessages(
       text: message.text,
       createdTime: message.createdTime ?? message.deliveredTime ?? null,
     }))
+    // The snapshot above goes stale across the awaits in this loop: an
+    // exclude_chats call can land meanwhile and purge before we write.
+    // Re-read the denylist synchronously, with no await before the upsert,
+    // so a chat excluded mid-collection is never written back.
+    if (getExcludedChatIds().has(chatId)) {
+      continue
+    }
     messagesIndexed += upsertMessages(rows)
     messagesEmbedded += await embedAndStore(rows, options.embedder)
   }
@@ -220,6 +227,11 @@ async function embedAndStore(
   }
   try {
     const vectors = await embedder.embed(rows.map((row) => row.text))
+    // Same race as the message upsert: the chat may have been excluded (and
+    // purged) while the model ran. Re-check before writing its vectors.
+    if (getExcludedChatIds().has(rows[0].chatId)) {
+      return 0
+    }
     return upsertEmbeddings(
       rows.map((row, i) => ({ messageId: row.messageId, vector: vectors[i] })),
       embedder.modelLabel,

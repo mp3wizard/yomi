@@ -55,8 +55,12 @@ interface BunDatabase {
 
 function wrapBunDb(raw: BunDatabase): Database {
   return {
-    exec(sql: string) {
-      raw.run(sql)
+    exec(sql: string, params?: unknown[]) {
+      if (params && params.length > 0) {
+        raw.run(sql, params)
+      } else {
+        raw.run(sql)
+      }
     },
     prepare<T = Record<string, unknown>>(sql: string): Statement<T> {
       const q = raw.query<T>(sql)

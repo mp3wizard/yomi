@@ -50,6 +50,8 @@ export interface ComputeInsightsOptions {
   selfMid: string | null
   /** Embedder whose model label selects which stored vectors to read. */
   embedder: Embedder
+  /** Denylisted chats; their rows are dropped before any section is computed. */
+  excludedChatIds?: ReadonlySet<string>
 }
 
 const DEFAULT_LOOKBACK_MS = 21 * 24 * 60 * 60 * 1000
@@ -72,7 +74,12 @@ export function computeInsights(opts: ComputeInsightsOptions): InsightPackage {
   if (getEmbeddingCount(model) === 0) {
     return EMPTY
   }
-  const all = getMessagesWithVectors(model)
+  // Drop excluded chats up front: connectors and window are person/aggregate
+  // views with no chatId to post-filter on, so they must never see those rows.
+  const excluded = opts.excludedChatIds
+  const all = excluded
+    ? getMessagesWithVectors(model).filter((r) => !excluded.has(r.chatId))
+    : getMessagesWithVectors(model)
   if (all.length === 0) {
     return EMPTY
   }

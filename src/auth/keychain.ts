@@ -18,6 +18,51 @@ import { createCliLogger } from '../util/log.js'
 const SERVICE_NAME = 'dev.rikai.yomi.credentials'
 const authLog = createCliLogger('AUTH')
 
+/** Absolute path, so a `security` earlier on PATH cannot intercept the secret. */
+const SECURITY_BIN = '/usr/bin/security'
+
+/**
+ * `security -i` reads its command lines in 4096-byte chunks and runs any
+ * overflow as a separate command, which would store a truncated secret and
+ * echo the remainder to stderr. Stay well below that.
+ */
+const MAX_INTERACTIVE_LINE_BYTES = 4000
+
+/**
+ * Quote one argument for the `security -i` command parser: inside double
+ * quotes a backslash escapes the next character, nothing else is special.
+ *
+ * @param value - Raw argument.
+ * @returns The quoted argument.
+ */
+function quoteInteractiveArg(value: string): string {
+  return `"${value.replace(/[\\"]/g, '\\$&')}"`
+}
+
+/**
+ * Build the stdin line for `security -i` that stores a generic password, so
+ * the secret never appears in any process argv (which other local users can
+ * read with `ps`).
+ *
+ * @param service - Keychain service name.
+ * @param account - Account name.
+ * @param password - Secret to store.
+ * @returns The command line, or null when it cannot be sent safely (line
+ *   breaks or NUL in a value, or too long for `security -i`).
+ */
+export function buildAddGenericPasswordLine(
+  service: string,
+  account: string,
+  password: string,
+): string | null {
+  const all = service + account + password
+  if (/[\r\n]/.test(all) || all.includes('\0')) {
+    return null
+  }
+  const line = `add-generic-password -U -s ${quoteInteractiveArg(service)} -a ${quoteInteractiveArg(account)} -w ${quoteInteractiveArg(password)}\n`
+  return Buffer.byteLength(line) <= MAX_INTERACTIVE_LINE_BYTES ? line : null
+}
+
 export interface CredentialResult {
   success: boolean
   account?: string
@@ -29,7 +74,10 @@ export interface CredentialResult {
  * Wrapper for macOS `security` keychain CLI commands.
  */
 class KeychainCommands {
-  constructor(private serviceName: string) {}
+  constructor(
+    private serviceName: string,
+    private securityBin: string = SECURITY_BIN,
+  ) {}
 
   /**
    * Store a credential in Keychain.
@@ -39,18 +87,26 @@ class KeychainCommands {
    * @returns Promise resolving to credential result.
    */
   async set(account: string, password: string): Promise<CredentialResult> {
+    const line = buildAddGenericPasswordLine(
+      this.serviceName,
+      account,
+      password,
+    )
+    if (!line) {
+      // Never fall back to argv. Remove the older copy instead, so readers
+      // that try the Keychain first (the Rust desktop app) do not pick up a
+      // stale session; CredentialStore keeps the 0600 file mirror either way.
+      await this.delete(account)
+      const error = 'Credential too large to store in Keychain without argv'
+      authLog.warn('keychain.store.skipped', { account, error })
+      return { success: false, account, error }
+    }
     return new Promise((resolve) => {
-      const child = spawn('security', [
-        'add-generic-password',
-        '-s',
-        this.serviceName,
-        '-a',
-        account,
-        '-w',
-        password,
-        '-U',
-        '-A',
-      ])
+      // No `-A`: the item stays readable only by the creating tool
+      // (/usr/bin/security), not by every application without a prompt.
+      const child = spawn(this.securityBin, ['-i'])
+      child.stdin.on('error', () => {})
+      child.stdin.end(line)
 
       let stderr = ''
       child.stderr.on('data', (data) => {
@@ -88,7 +144,7 @@ class KeychainCommands {
    */
   async get(account: string): Promise<CredentialResult> {
     return new Promise((resolve) => {
-      const child = spawn('security', [
+      const child = spawn(this.securityBin, [
         'find-generic-password',
         '-s',
         this.serviceName,
@@ -140,7 +196,7 @@ class KeychainCommands {
    */
   async delete(account: string): Promise<CredentialResult> {
     return new Promise((resolve) => {
-      const child = spawn('security', [
+      const child = spawn(this.securityBin, [
         'delete-generic-password',
         '-s',
         this.serviceName,
@@ -183,8 +239,11 @@ class KeychainCommands {
 export class KeychainService {
   private commands: KeychainCommands
 
-  constructor() {
-    this.commands = new KeychainCommands(SERVICE_NAME)
+  /**
+   * @param securityBin - Path to the `security` tool; tests pass a stand-in.
+   */
+  constructor(securityBin: string = SECURITY_BIN) {
+    this.commands = new KeychainCommands(SERVICE_NAME, securityBin)
   }
 
   /**

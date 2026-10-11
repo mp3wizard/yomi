@@ -16,3 +16,13 @@ test('SqliteUnavailableError names the runtime and the requirement', () => {
   expect(e.name).toBe('SqliteUnavailableError')
   expect(e instanceof Error).toBe(true)
 })
+
+test('exec honours bound params (purge DELETE must not be a no-op)', () => {
+  const db = openDatabase(':memory:')
+  db.exec('CREATE TABLE t(a)')
+  db.exec('INSERT INTO t VALUES (?), (?), (?)', ['x', 'y', 'z'])
+  db.exec('DELETE FROM t WHERE a IN (?, ?)', ['x', 'y'])
+  const rows = db.prepare<{ a: string }>('SELECT a FROM t').all()
+  expect(rows.map((r) => r.a)).toEqual(['z'])
+  db.close()
+})

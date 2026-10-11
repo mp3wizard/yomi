@@ -442,6 +442,7 @@ extension AppState {
 
         if alert.runModal() == .alertFirstButtonReturn {
             CredentialManager.clearCredentials()
+            clearAccountChatState()
             refreshState()
             sendNotification(title: "Yomi", body: "Signed out successfully.")
         }

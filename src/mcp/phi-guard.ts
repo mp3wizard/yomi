@@ -45,6 +45,39 @@ function passesLuhn(digits: string): boolean {
 }
 
 /**
+ * True when a digit run contains a Luhn-valid card. A card written next to
+ * other digits (expiry, CVV, a reference number) forms one longer run, so the
+ * whole run failing Luhn is not enough. To stay narrow, only spans that start
+ * and end on a separator are tried; raw 13-19 digit windows are tried only
+ * inside an unseparated group longer than any card.
+ * Known gap: a card glued to 1-3 extra digits with no separator still escapes;
+ * scanning raw windows there would mask most ordinary 14-19 digit numbers.
+ * @param match - The matched run, separators included.
+ * @returns True when some span looks like a payment card.
+ */
+function containsLuhnCard(match: string): boolean {
+  const groups = match.split(/[ -]/)
+  for (let i = 0; i < groups.length; i++) {
+    let digits = ''
+    for (let j = i; j < groups.length && digits.length < 19; j++) {
+      digits += groups[j]
+      if (passesLuhn(digits)) {
+        return true
+      }
+    }
+    const group = groups[i]
+    for (let len = 13; group.length > 19 && len <= 19; len++) {
+      for (let start = 0; start + len <= group.length; start++) {
+        if (passesLuhn(group.slice(start, start + len))) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+}
+
+/**
  * Mask one matched value, preserving a little edge context (for example, Q12••9): the
  * first few characters and, for longer values, the last one.
  * @param value - The raw matched substring.
@@ -57,11 +90,11 @@ function maskValue(value: string): string {
   return `${head}${MASK_MIDDLE}${tail}`
 }
 
-/** One detection rule. `validateDigits` (optional) gates a match on its digit-only form. */
+/** One detection rule. `validate` (optional) gates a match on its raw text. */
 interface PhiPattern {
   type: string
   re: RegExp
-  validateDigits?: (digits: string) => boolean
+  validate?: (match: string) => boolean
 }
 
 // Order matters: email and phone are matched before the broad card pattern so
@@ -71,7 +104,13 @@ const PATTERNS: PhiPattern[] = [
   { type: 'id', re: /\b[A-Z][12]\d{8}\b/g },
   { type: 'phone', re: /\+886[\s-]?\d(?:[\s-]?\d){7,}/g },
   { type: 'phone', re: /\b09\d{8}\b/g },
-  { type: 'card', re: /\b(?:\d[ -]?){13,19}\b/g, validateDigits: passesLuhn },
+  // The whole digit run (no upper bound), so a card embedded in a longer run
+  // is still matched; containsLuhnCard then looks for the card inside it.
+  {
+    type: 'card',
+    re: /\b\d(?:[ -]?\d){12,}\b/g,
+    validate: containsLuhnCard,
+  },
 ]
 
 /**
@@ -97,9 +136,9 @@ export function maskInto<T extends string | null | undefined>(
     return value
   }
   let text: string = value
-  for (const { type, re, validateDigits } of PATTERNS) {
+  for (const { type, re, validate } of PATTERNS) {
     text = text.replace(re, (match) => {
-      if (validateDigits && !validateDigits(match.replace(/\D/g, ''))) {
+      if (validate && !validate(match)) {
         return match
       }
       acc.count += 1

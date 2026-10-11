@@ -340,6 +340,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.syncError = self.chatLoadError
             return
         }
+        // Bind this fetch to the account it was issued for: a result landing
+        // after sign-out or an account switch is dropped, never shown or saved.
+        let requestMid = CredentialManager.loadCredentials()?.lineMid
 
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
@@ -366,6 +369,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         let decoded = try? JSONDecoder().decode([LineChatItem].self, from: jsonData)
                     {
                         DispatchQueue.main.async {
+                            let current = CredentialManager.loadCredentials()
+                            guard current?.lineAuthToken?.isEmpty == false, current?.lineMid == requestMid else {
+                                self.isLoadingChats = false
+                                self.isSyncing = false
+                                self.chatRefreshInFlight = false
+                                return
+                            }
                             let previousChats = self.chats
                             let selectedID = self.selectedChatId
                             let previousSelectedTimestamp = selectedID.flatMap { id in
@@ -397,7 +407,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 }
                             }
                             self.hasLoadedChatsOnce = true
-                            if self.chats != previousChats { DesktopChatSnapshotStore.save(self.chats) }
+                            if self.chats != previousChats, let requestMid {
+                                DesktopChatSnapshotStore.save(self.chats, mid: requestMid)
+                            }
                             self.chatLoadError = nil
                             self.isLoadingChats = false
                             self.chatRefreshInFlight = false
@@ -439,6 +451,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.syncError = self.chatLoadError
             }
         }
+    }
+
+    /// Drops every trace of the signed-out account's chats, on disk and in
+    /// memory, so the next account never sees them.
+    func clearAccountChatState() {
+        DesktopChatSnapshotStore.clear()
+        chats = []
+        messageCache = [:]
+        currentChatMessages = []
+        selectedChatId = nil
+        hasLoadedChatsOnce = false
     }
 
     private func loadCachedChatSnapshot() {

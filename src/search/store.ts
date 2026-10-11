@@ -53,8 +53,11 @@ function restrictToOwner(...paths: string[]): void {
 // put the index inside the installed package — and `npx @rikaidev/yomi` unpacks
 // under ~/.npm/_npx/<hash>/, which npm deletes on any cache refresh. The index
 // went with it. YOMI_INDEX_DB_PATH still overrides for tests/custom setups.
-const DB_PATH =
-  process.env.YOMI_INDEX_DB_PATH ?? yomiDataPath('search-index.db')
+// Read when the database is first opened, not at import: a test that sets it
+// must not lose to another test file having imported this module first.
+function dbPath(): string {
+  return process.env.YOMI_INDEX_DB_PATH ?? yomiDataPath('search-index.db')
+}
 
 /** One message as stored in (or retrieved from) the search index. */
 export interface MessageRecord {
@@ -109,11 +112,12 @@ export function getDb(): Database {
   if (db) {
     return db
   }
-  const dir = dirname(DB_PATH)
+  const dbFile = dbPath()
+  const dir = dirname(dbFile)
   if (dir && dir !== '.' && !existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
-  const handle = openDatabase(DB_PATH)
+  const handle = openDatabase(dbFile)
   handle.exec('PRAGMA journal_mode = WAL;')
   // This file is every captured message in plaintext — the single most
   // sensitive artifact Yomi produces. It was being created with the default
@@ -122,7 +126,7 @@ export function getDb(): Database {
   // treatment. Applied on every open, not just creation, so databases that
   // already exist with the old permissions are repaired rather than left
   // exposed for the lifetime of the install.
-  restrictToOwner(DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`)
+  restrictToOwner(dbFile, `${dbFile}-wal`, `${dbFile}-shm`)
   handle.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY,

@@ -29,14 +29,15 @@ export async function handleGetInsight(
   service: LineProtocolService,
   args: { chatId?: string; sinceHours?: number },
 ) {
+  const excluded = getExcludedChatIds()
   const pkg = computeInsights({
     focusChatId: args.chatId,
     sinceHours: args.sinceHours,
     selfMid: service.profile?.mid ?? null,
     embedder: getDefaultEmbedder(),
+    excludedChatIds: excluded,
   })
 
-  const excluded = getExcludedChatIds()
   const filtered: InsightPackage = {
     window: pkg.window,
     relationships: pkg.relationships.filter((r) => !excluded.has(r.chatId)),

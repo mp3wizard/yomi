@@ -482,18 +482,42 @@ final class CodexAppServerBackend: AgentBackend, @unchecked Sendable {
             cwd: params["cwd"] as? String,
             reason: params["reason"] as? String,
             canAcceptForSession: canAcceptForSession,
-            persistentRuleKey: persistentReadOnlyRule(for: params["command"] as? String)
+            persistentRuleKey: method.contains("commandExecution") && !hasAdditionalPermissions(params)
+                ? persistentReadOnlyRule(for: params["command"] as? String, cwd: params["cwd"] as? String)
+                : nil
         )
     }
 
-    private static func persistentReadOnlyRule(for rawCommand: String?) -> String? {
-        guard var command = rawCommand, !command.isEmpty else { return nil }
-        if let firstQuote = command.firstIndex(of: "'"), let lastQuote = command.lastIndex(of: "'"), firstQuote < lastQuote {
-            command = String(command[command.index(after: firstQuote)..<lastQuote])
+    /// A request that also asks for extra permissions is never covered by a
+    /// saved read-only rule; it always goes to the user.
+    private static func hasAdditionalPermissions(_ params: [String: Any]) -> Bool {
+        switch params["additionalPermissions"] {
+        case nil, is NSNull: return false
+        case let value as [Any]: return !value.isEmpty
+        case let value as [String: Any]: return !value.isEmpty
+        default: return true
         }
-        let forbidden = [";", "&&", "||", "|", ">", "<", "$(", "`", "\n"]
-        guard !forbidden.contains(where: command.contains) else { return nil }
-        var tokens = command.split(whereSeparator: \.isWhitespace).map(String.init)
+    }
+
+    /// The saved-rule key for a command, or nil when it must always prompt.
+    /// Only one simple command qualifies: an optional `<shell> -lc '<inner>'`
+    /// wrapper, then words made of a strict character allow-list (so no shell
+    /// metacharacter such as `& $ ( ) { } * ? ~ ! # ; | < >` or quotes can
+    /// appear anywhere), starting with a permitted read-only glab command. The
+    /// key is the whole normalized command plus cwd, never a prefix, so a rule
+    /// saved for one exact invocation matches nothing else.
+    private static func persistentReadOnlyRule(for rawCommand: String?, cwd: String?) -> String? {
+        guard var command = rawCommand, !command.isEmpty else { return nil }
+        let wrapper = #"\A/bin/(zsh|bash|sh) -lc '([^']*)'\z"#
+        if let regex = try? NSRegularExpression(pattern: wrapper),
+            let match = regex.firstMatch(in: command, range: NSRange(command.startIndex..., in: command)),
+            let inner = Range(match.range(at: 2), in: command)
+        {
+            command = String(command[inner])
+        }
+        let word = "[A-Za-z0-9_./:=@-]+"
+        guard command.range(of: "\\A\(word)( \(word))*\\z", options: .regularExpression) != nil else { return nil }
+        var tokens = command.split(separator: " ").map(String.init)
         if tokens.first == "rtk" { tokens.removeFirst() }
         let permittedPrefixes = [
             ["glab", "repo", "list"],
@@ -502,7 +526,9 @@ final class CodexAppServerBackend: AgentBackend, @unchecked Sendable {
             ["glab", "issue", "view"],
             ["glab", "search", "issues"],
         ]
-        return permittedPrefixes.first(where: { tokens.starts(with: $0) })?.joined(separator: " ")
+        guard permittedPrefixes.contains(where: { tokens.starts(with: $0) }) else { return nil }
+        // The command cannot contain a newline, so this split is unambiguous.
+        return tokens.joined(separator: " ") + "\n" + (cwd ?? "")
     }
 
     private static func isTrustedYomiRequest(
@@ -531,7 +557,9 @@ final class CodexAppServerBackend: AgentBackend, @unchecked Sendable {
 }
 
 enum AgentApprovalPolicyStore {
-    private static let key = "yomi_permanent_readonly_approvals_v1"
+    // v1 stored bare command prefixes; they are deliberately not honoured.
+    private static let key = "yomi_permanent_readonly_approvals_v2"
+    private static let legacyKey = "yomi_permanent_readonly_approvals_v1"
 
     static func contains(_ rule: String) -> Bool {
         Set(UserDefaults.standard.stringArray(forKey: key) ?? []).contains(rule)
@@ -549,6 +577,7 @@ enum AgentApprovalPolicyStore {
 
     static func removeAll() {
         UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: legacyKey)
     }
 }
 

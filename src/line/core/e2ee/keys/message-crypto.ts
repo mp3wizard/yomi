@@ -43,9 +43,17 @@ export function decryptV2(
 ): string {
   const gcmKey = deriveGCMKey(shared, salt)
   const tagLength = 16
+  // Require a full 16-byte tag plus at least one byte of data. Without this a
+  // short buffer yields a truncated tag, which node accepts unless the tag
+  // length is pinned, weakening authentication to as little as 4 bytes.
+  if (ciphertext.length <= tagLength) {
+    throw new Error('E2EE ciphertext too short')
+  }
   const encData = ciphertext.subarray(0, ciphertext.length - tagLength)
   const authTag = ciphertext.subarray(ciphertext.length - tagLength)
-  const decipher = crypto.createDecipheriv('aes-256-gcm', gcmKey, nonce)
+  const decipher = crypto.createDecipheriv('aes-256-gcm', gcmKey, nonce, {
+    authTagLength: tagLength,
+  })
   decipher.setAuthTag(authTag)
   decipher.setAAD(aad)
   return Buffer.concat([decipher.update(encData), decipher.final()]).toString(
